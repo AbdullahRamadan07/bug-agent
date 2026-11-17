@@ -1,22 +1,22 @@
-﻿# bug-agent
+# bug-agent
 
 AI agents that pick up the Azure DevOps bugs assigned to you, find the root cause across your projects, and write the fix on a branch for you to review.
 
 ```
  every hour
-     â”‚
-     â–¼
- bug-intake   (Haiku)    Azure DevOps: Bugs Â· State=New Â· Assigned to @Me, not handled yet
-     â”‚                   â†’ summary + likely projects for each bug
-     â–¼
+     │
+     ▼
+ bug-intake   (Haiku)    Azure DevOps: Bugs · State=New · Assigned to @Me, not handled yet
+     │                   → summary + likely projects for each bug
+     ▼
  bug-planner  (Opus, medium effort)   reads your projects (read-only), confirms the root cause,
-     â”‚                                writes an ordered plan: one task per project
-     â–¼
+     │                                writes an ordered plan: one task per project
+     ▼
  bug-fixer    (Sonnet)   applies each project's tasks, in plan order
-     â”‚
-     â–¼
- git project   â†’ separate worktree, branch ai-fix/bug-<id>, local commit
- other folder  â†’ reviewable copies + _FIX_NOTES.md in the plugin's data folder
+     │
+     ▼
+ git project   → separate worktree, branch ai-fix/bug-<id>, local commit
+ other folder  → reviewable copies + _FIX_NOTES.md in the plugin's data folder
 ```
 
 The repo has two ways to run it:
@@ -60,7 +60,7 @@ Restart Claude Code after changing options, then:
 | `/bug-agent:schedule` | Makes it run hourly: desktop app task, `/loop 1h`, or Windows Task Scheduler / cron via headless `claude -p` (it asks before registering anything) |
 | `/bug-agent:status` | Handled bugs, outcomes, branches and patch folders. `/bug-agent:status reset 65369` re-queues a bug. |
 
-Requirements: Claude Code, Node.js 18+ (runs the plugin's Azure DevOps MCP server, which has no dependencies), and git.
+Requirements: Claude Code, a **Java 17+ JDK** on your PATH, and git. The plugin's Azure DevOps MCP server is a single Java source file with no dependencies; `java` compiles and runs it directly, so there's nothing to build. (It needs a JDK, not just a JRE, because the source launcher compiles the file.)
 
 ## What it will and won't do
 
@@ -80,15 +80,17 @@ plugins/bug-agent/
   .mcp.json                       starts the Azure DevOps / state MCP server
   agents/                         bug-intake (haiku), bug-planner (opus), bug-fixer (sonnet)
   skills/                         setup, cycle, schedule, status
-  server/ado-mcp.mjs              MCP server: Azure DevOps REST, project list, worktrees/overlays, history
-tests/ado-mcp.test.mjs            MCP server tests (node --test tests/ado-mcp.test.mjs)
+  server/AdoMcp.java              MCP server (Java 17+, no dependencies): Azure DevOps REST, project list,
+                                  worktrees/overlays, history
+tests/ado-mcp.test.mjs            black-box MCP tests: start AdoMcp.java over stdio against a fake Azure DevOps
 service/                          standalone API-key version with dashboard and Docker (see service/README.md)
 ```
 
 ## Develop
 
 ```bash
-node --test tests/ado-mcp.test.mjs
+javac --release 17 -d build plugins/bug-agent/server/AdoMcp.java   # compile check
+node --test tests/ado-mcp.test.mjs                                   # tests (Node 18+ only needed for the tests)
 claude plugin validate ./plugins/bug-agent
 claude --plugin-dir ./plugins/bug-agent
 ```

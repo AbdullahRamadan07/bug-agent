@@ -1,4 +1,4 @@
-﻿// Run with: node --test tests/
+// Run with: node --test tests/
 // Talks to the real MCP server over stdio, against a fake Azure DevOps API.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -10,7 +10,9 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../plugins/bug-agent/server/ado-mcp.mjs");
+// The MCP server is a single Java source file run by the JDK source launcher, exactly as .mcp.json does.
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../plugins/bug-agent/server/AdoMcp.java");
+const JAVA = process.env.JAVA ?? "java";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bug-agent-mcp-"));
 const requests = [];
 let azure, baseUrl;
@@ -43,7 +45,7 @@ after(() => {
 });
 
 function startServer(env) {
-  const proc = spawn(process.execPath, [SERVER], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
+  const proc = spawn(JAVA, [SERVER], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
   procs.push(proc);
   const rl = readline.createInterface({ input: proc.stdout });
   const waiting = new Map();
@@ -71,7 +73,7 @@ const ENV = (dataDir, extra = {}) => ({
   AZURE_DEVOPS_ORG: "acme",
   AZURE_DEVOPS_PROJECT: "Contoso Portal",
   AZURE_DEVOPS_PAT: "secret",
-  AZURE_DEVOPS_ASSIGNED_TO: "${user_config.assigned_to}", // unset option arrives unsubstituted â†’ default @Me
+  AZURE_DEVOPS_ASSIGNED_TO: "${user_config.assigned_to}", // unset option arrives unsubstituted → default @Me
   AZURE_DEVOPS_STATES: "New",
   AZURE_DEVOPS_BASE_URL: baseUrl,
   BUG_AGENT_DATA: dataDir,
@@ -109,7 +111,7 @@ test("lists New bugs with links, skips handled ones, retries errors up to the li
   await s.call("record_bug", { id: 101, title: "Bug 101", outcome: "fixed" });
   await s.call("record_bug", { id: 102, title: "Bug 102", outcome: "error" });
   const r2 = await s.call("list_new_bugs", { limit: 5 });
-  assert.deepEqual(r2.bugs.map((b) => b.id), [102, 103]); // 102 errored once â†’ retried
+  assert.deepEqual(r2.bugs.map((b) => b.id), [102, 103]); // 102 errored once → retried
   await s.call("record_bug", { id: 102, title: "Bug 102", outcome: "error" });
   const r3 = await s.call("list_new_bugs", { limit: 5 });
   assert.deepEqual(r3.bugs.map((b) => b.id), [103]); // 2 attempts used

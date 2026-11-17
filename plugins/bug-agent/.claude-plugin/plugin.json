@@ -1,6 +1,6 @@
 {
   "name": "bug-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Hourly Azure DevOps bug fixer: a Haiku intake agent pulls New bugs assigned to you, an Opus agent finds the root cause across your projects, and Sonnet agents write the fix on a branch for review.",
   "author": { "name": "bug-agent maintainers" },
   "keywords": ["azure-devops", "bugs", "agents", "automation"],
