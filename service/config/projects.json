@@ -1,0 +1,20 @@
+﻿[
+  {
+    "name": "just-fast",
+    "path": "../../just-fast",
+    "description": "Full-stack app: Spring Boot (Java/Maven) backend in backend/, Angular frontend in frontend/, docker-compose deploy. Git repo.",
+    "applyMode": "auto"
+  },
+  {
+    "name": "fieldstone-marketplace-backend",
+    "path": "../../fieldstone-market-marketplace/marketplace",
+    "description": "Fieldstone Market marketplace backend (Java/Maven in backend/). Not a git repo: fixes are written as reviewable overlay files.",
+    "applyMode": "auto"
+  },
+  {
+    "name": "marketplace-fe",
+    "path": "../../Marketplace FE",
+    "description": "Marketplace frontend (Angular, nginx). Consumes the Fieldstone marketplace backend API. Not a git repo: overlay mode.",
+    "applyMode": "auto"
+  }
+]

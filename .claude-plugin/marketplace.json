@@ -1,0 +1,12 @@
+{
+  "name": "bug-agent",
+  "description": "Azure DevOps bug-fixing agents for Claude Code",
+  "owner": { "name": "bug-agent maintainers" },
+  "plugins": [
+    {
+      "name": "bug-agent",
+      "source": "./plugins/bug-agent",
+      "description": "Hourly Azure DevOps bug fixer: Haiku intake, Opus root-cause planner, Sonnet fixers on review branches. Runs on your Claude login, no API key."
+    }
+  ]
+}

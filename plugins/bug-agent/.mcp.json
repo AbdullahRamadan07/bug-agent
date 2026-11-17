@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "ado": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/ado-mcp.mjs"],
+      "env": {
+        "AZURE_DEVOPS_ORG": "${user_config.azure_org}",
+        "AZURE_DEVOPS_PROJECT": "${user_config.azure_project}",
+        "AZURE_DEVOPS_PAT": "${user_config.azure_pat}",
+        "AZURE_DEVOPS_ASSIGNED_TO": "${user_config.assigned_to}",
+        "AZURE_DEVOPS_STATES": "${user_config.bug_states}",
+        "BUG_AGENT_POST_COMMENTS": "${user_config.post_comments}",
+        "BUG_AGENT_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
+}

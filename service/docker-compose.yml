@@ -1,0 +1,19 @@
+﻿services:
+  bug-agent:
+    build: .
+    image: bug-agent:latest
+    container_name: bug-agent
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "4000:4000"
+    volumes:
+      - bug-agent-data:/app/data
+      # Projects the agents investigate. Git projects need read-write
+      # (worktrees are registered in their .git); overlay projects can be :ro.
+      - ../../just-fast:/projects/just-fast
+      - ../../fieldstone-market-marketplace:/projects/fieldstone-market-marketplace:ro
+      - "../../Marketplace FE:/projects/Marketplace FE:ro"
+
+volumes:
+  bug-agent-data:

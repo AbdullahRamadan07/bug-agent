@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bug Agent</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #1b1f24; --muted: #5b6573; --line: #e3e6ea;
+    --accent: #3b5bdb; --ok: #2b8a3e; --warn: #c77700; --bad: #c92a2a; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --panel: #191d22; --ink: #e7eaee; --muted: #99a3b0; --line: #2a3038;
+      --accent: #7b93ff; --ok: #5cc777; --warn: #f0a63a; --bad: #ff6b6b; --chip: #232931; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px; display: grid; gap: 16px; grid-template-columns: 320px 1fr; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 99px; background: var(--chip); font-size: 12px; color: var(--muted); }
+  .chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); } .chip.run { color: var(--accent); }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 7px; padding: 8px 14px; font: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.link { background: none; color: var(--accent); padding: 0; }
+  .spacer { flex: 1; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+  dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+  .flow { display: grid; gap: 6px; margin-top: 4px; }
+  .flow div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .flow b { display: block; } .flow small { color: var(--muted); }
+  .cycle { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+  .cycle > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .cycle > summary::-webkit-details-marker { display: none; }
+  .cycle[open] > summary { border-bottom: 1px solid var(--line); }
+  .bug { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .bug:last-child { border-bottom: 0; }
+  .bug a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .task { margin: 6px 0 0 0; padding: 8px 10px; background: var(--chip); border-radius: 8px; font-size: 13px; }
+  pre { background: var(--chip); padding: 10px; border-radius: 8px; overflow: auto; font-size: 12px; max-height: 240px; margin: 8px 14px 14px; white-space: pre-wrap; }
+  .muted { color: var(--muted); }
+  .warnbox { border-left: 3px solid var(--warn); padding: 8px 12px; background: var(--chip); border-radius: 6px; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 4px 0; border-bottom: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bug Agent</h1>
+  <span id="mode" class="chip"></span>
+  <span id="state" class="chip"></span>
+  <span class="spacer"></span>
+  <span class="muted" id="next"></span>
+  <button id="run">Run cycle now</button>
+</header>
+<main>
+  <aside style="display:grid;gap:16px;align-content:start">
+    <section class="panel">
+      <h2>Workflow</h2>
+      <div class="flow">
+        <div><b>1 · Intake</b><small id="m-poller"></small><br><small>Checks Azure DevOps for New bugs assigned to you</small></div>
+        <div><b>2 · Diagnose &amp; plan</b><small id="m-main"></small><br><small>Investigates every project, writes an ordered fix plan</small></div>
+        <div><b>3 · Fix</b><small id="m-fixer"></small><br><small>Applies each project's tasks in plan order</small></div>
+      </div>
+    </section>
+    <section class="panel"><h2>Azure DevOps</h2><dl id="azure"></dl></section>
+    <section class="panel"><h2>Projects</h2><table id="projects"></table></section>
+    <section class="panel"><h2>Handled bugs</h2><table id="bugs"></table></section>
+  </aside>
+  <section class="panel">
+    <h2>Cycles</h2>
+    <div id="missing"></div>
+    <div id="cycles"><p class="muted">No cycles yet.</p></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (iso) => iso ? new Date(iso).toLocaleString() : "—";
+const outcomeClass = { fixed: "ok", partially_fixed: "warn", needs_human: "warn", error: "bad" };
+const openState = new Set();
+
+async function load() {
+  const [status, cycles, bugs] = await Promise.all(
+    ["/api/status", "/api/cycles", "/api/bugs"].map((u) => fetch(u).then((r) => r.json())));
+  $("mode").textContent = status.mockMode ? "mock mode" : "live";
+  $("mode").className = "chip " + (status.mockMode ? "warn" : "ok");
+  $("state").textContent = status.running ? "cycle running…" : "idle";
+  $("state").className = "chip " + (status.running ? "run" : "");
+  $("run").disabled = status.running || status.missingConfig.length > 0;
+  $("next").textContent = status.nextRun ? "Next run " + fmt(status.nextRun) : "";
+  $("m-poller").textContent = " " + status.models.poller;
+  $("m-main").textContent = " " + status.models.main;
+  $("m-fixer").textContent = " " + status.models.fixer;
+  $("azure").innerHTML = `<dt>Org</dt><dd>${esc(status.azure.org ?? "not set")}</dd><dt>Project</dt><dd>${esc(status.azure.project ?? "not set")}</dd>
+    <dt>Query</dt><dd>Bugs · ${esc(status.azure.states.join("/"))} · ${esc(status.azure.assignedTo)}</dd>
+    <dt>Schedule</dt><dd><code>${esc(status.schedule)}</code></dd><dt>Comments</dt><dd>${status.azure.postComments ? "posted on bugs" : "off"}</dd>`;
+  $("projects").innerHTML = status.projects.map((p) => `<tr><td><b>${esc(p.name)}</b><br><span class="muted">${esc(p.description)}</span></td><td class="muted">${esc(p.applyMode)}</td></tr>`).join("") || "<tr><td class='muted'>None configured</td></tr>";
+  $("bugs").innerHTML = bugs.map((b) => `<tr><td>#${b.id} ${esc(b.title)}<br><span class="chip ${outcomeClass[b.lastOutcome] ?? ""}">${esc(b.lastOutcome)}</span> <span class="muted">${b.attempts} attempt(s)</span></td><td><button class="link" data-reset="${b.id}" title="Process again next cycle">retry</button></td></tr>`).join("") || "<tr><td class='muted'>None yet</td></tr>";
+  $("missing").innerHTML = status.missingConfig.length ? `<div class="warnbox">Cycles are paused. Missing configuration: <b>${esc(status.missingConfig.join(", "))}</b></div>` : "";
+  if (cycles.length) $("cycles").innerHTML = cycles.map(renderCycle).join("");
+  document.querySelectorAll("details.cycle").forEach((d) => d.addEventListener("toggle", () => d.open ? openState.add(d.dataset.id) : openState.delete(d.dataset.id)));
+}
+
+function renderCycle(c, i) {
+  const open = openState.has(c.id) || (i === 0 && openState.size === 0) ? "open" : "";
+  const st = { running: "run", completed: "ok", failed: "bad" }[c.status];
+  return `<details class="cycle" data-id="${esc(c.id)}" ${open}><summary>
+    <span class="chip ${st}">${esc(c.status)}</span><b>${fmt(c.startedAt)}</b>
+    <span class="muted">${esc(c.trigger)} · ${c.polled} assigned · ${c.newBugs} processed${c.skipped ? ` · ${c.skipped} deferred` : ""}</span></summary>
+    ${c.error ? `<div class="bug" style="color:var(--bad)">${esc(c.error)}</div>` : ""}
+    ${c.bugs.map(renderBug).join("")}
+    <pre>${esc(c.log.join("\n"))}</pre></details>`;
+}
+
+function renderBug(b) {
+  const p = b.plan;
+  const tasks = p?.tasks?.slice().sort((x, y) => x.order - y.order).map((t) =>
+    `<div class="task"><b>${t.order}. ${esc(t.project)}</b> <span class="muted">${esc(t.files.join(", "))}</span><br>${esc(t.instructions)}</div>`).join("") ?? "";
+  const fixes = b.fixes.map((f) => `<div class="task"><span class="chip ${f.status === "applied" ? "ok" : f.status === "failed" ? "bad" : "warn"}">${esc(f.status)}</span>
+    <b>${esc(f.project)}</b> · ${esc(f.mode)}${f.branch ? ` · branch <code>${esc(f.branch)}</code>` : ""}${f.commit ? ` · ${esc(f.commit)}` : ""}
+    <br><span class="muted">${esc(f.location)}</span><br>${esc(f.summary || f.error || "")}${f.filesChanged.length ? `<br><span class="muted">Files: ${esc(f.filesChanged.join(", "))}</span>` : ""}</div>`).join("");
+  return `<div class="bug"><a href="${esc(b.bug.url)}" target="_blank" rel="noopener">#${b.bug.id} ${esc(b.bug.title)}</a>
+    <span class="chip ${outcomeClass[b.outcome] ?? ""}">${esc(b.outcome.replace("_", " "))}</span>
+    ${b.bug.summary ? `<div class="muted">${esc(b.bug.summary)}</div>` : ""}
+    ${b.error ? `<div style="color:var(--bad)">${esc(b.error)}</div>` : ""}
+    ${p ? `<div style="margin-top:6px"><b>Root cause</b> <span class="chip">${esc(p.confidence)} confidence</span><br>${esc(p.rootCause)}</div>${tasks}
+      ${fixes ? `<div style="margin-top:8px"><b>Fix results</b></div>${fixes}` : ""}
+      <div style="margin-top:6px"><b>Verify</b><br>${esc(p.testingNotes)}</div>` : ""}</div>`;
+}
+
+$("run").onclick = async () => {
+  $("run").disabled = true;
+  const r = await fetch("/api/run", { method: "POST" });
+  if (!r.ok) alert((await r.json()).error);
+  load();
+};
+document.addEventListener("click", async (e) => {
+  const id = e.target?.dataset?.reset;
+  if (!id) return;
+  await fetch(`/api/bugs/${id}/reset`, { method: "POST" });
+  load();
+});
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>

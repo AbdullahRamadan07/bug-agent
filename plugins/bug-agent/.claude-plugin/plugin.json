@@ -1,0 +1,54 @@
+{
+  "name": "bug-agent",
+  "version": "1.0.0",
+  "description": "Hourly Azure DevOps bug fixer: a Haiku intake agent pulls New bugs assigned to you, an Opus agent finds the root cause across your projects, and Sonnet agents write the fix on a branch for review.",
+  "author": { "name": "bug-agent maintainers" },
+  "keywords": ["azure-devops", "bugs", "agents", "automation"],
+  "userConfig": {
+    "azure_org": {
+      "type": "string",
+      "title": "Azure DevOps organization",
+      "description": "The part after dev.azure.com/ in your Azure DevOps URL",
+      "required": true
+    },
+    "azure_project": {
+      "type": "string",
+      "title": "Azure DevOps project",
+      "description": "Project name exactly as shown in Azure DevOps (spaces are fine)",
+      "required": true
+    },
+    "azure_pat": {
+      "type": "string",
+      "title": "Azure DevOps personal access token",
+      "description": "Scope: Work Items (Read). Use Read & write only if you enable comments. Stored in your OS credential store.",
+      "sensitive": true,
+      "required": true
+    },
+    "assigned_to": {
+      "type": "string",
+      "title": "Assigned to",
+      "description": "@Me for the token's owner, or a display name / email",
+      "default": "@Me"
+    },
+    "bug_states": {
+      "type": "string",
+      "title": "Bug states",
+      "description": "Comma-separated states to pick up",
+      "default": "New"
+    },
+    "max_bugs_per_cycle": {
+      "type": "number",
+      "title": "Max bugs per cycle",
+      "description": "Remaining bugs wait for the next cycle",
+      "default": 3,
+      "min": 1,
+      "max": 20
+    },
+    "post_comments": {
+      "type": "boolean",
+      "title": "Comment on bugs",
+      "description": "Post the root cause and fix branch as a comment on each processed bug (needs Read & write PAT)",
+      "default": false
+    }
+  }
+}
