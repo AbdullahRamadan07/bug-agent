@@ -1,7 +1,7 @@
 {
   "name": "bug-agent",
-  "version": "1.1.0",
-  "description": "Hourly Azure DevOps bug fixer: a Haiku intake agent pulls New bugs assigned to you, an Opus agent finds the root cause across your projects, and Sonnet agents write the fix on a branch for review.",
+  "version": "1.3.0",
+  "description": "Hourly Azure DevOps agent: a Haiku intake agent pulls New Bugs and Tasks assigned to you with their user story, an Opus agent plans the fix or implementation against the story's acceptance criteria, and Sonnet agents commit it on fix/us-<story> or feature/us-<story> branches for review.",
   "author": { "name": "bug-agent maintainers" },
   "keywords": ["azure-devops", "bugs", "agents", "automation"],
   "userConfig": {
@@ -32,17 +32,53 @@
     },
     "bug_states": {
       "type": "string",
-      "title": "Bug states",
-      "description": "Comma-separated states to pick up",
+      "title": "Work item states",
+      "description": "Comma-separated states of Bugs and Tasks to pick up",
       "default": "New"
     },
     "max_bugs_per_cycle": {
       "type": "number",
-      "title": "Max bugs per cycle",
-      "description": "Remaining bugs wait for the next cycle",
+      "title": "Max work items per cycle",
+      "description": "Bugs and Tasks beyond this wait for the next cycle",
       "default": 3,
       "min": 1,
       "max": 20
+    },
+    "work_item_types": {
+      "type": "string",
+      "title": "Work item types",
+      "description": "Comma-separated types to pick up when assigned to you. Bugs are fixed, Tasks are implemented",
+      "default": "Bug,Task"
+    },
+    "bug_branch_prefix": {
+      "type": "string",
+      "title": "Bug branch prefix",
+      "description": "Bugs go on a branch named prefix + user story number (e.g. fix/us-12345). An existing branch in the same family (fix/...) containing the story number is reused",
+      "default": "fix/us-"
+    },
+    "task_branch_prefix": {
+      "type": "string",
+      "title": "Task branch prefix",
+      "description": "Tasks go on a branch named prefix + user story number (e.g. feature/us-12345). An existing branch in the same family (feature/...) containing the story number is reused",
+      "default": "feature/us-"
+    },
+    "base_branch": {
+      "type": "string",
+      "title": "Base branch for new branches",
+      "description": "Every new branch is cut from this branch (origin/<name> preferred). If a repository has no such branch, its default branch is used. Empty = the remote's default branch",
+      "default": "UAT"
+    },
+    "sync_branch": {
+      "type": "string",
+      "title": "Sync new branches with",
+      "description": "Merged into each new branch right after it is cut from the base branch, so it starts as base + latest master. On a merge conflict the new branch is removed and the item is reported for a human. Empty = no sync",
+      "default": "master"
+    },
+    "branch_mode": {
+      "type": "string",
+      "title": "Branch mode",
+      "description": "worktree = open the story branch in a separate folder and leave your checkout alone (safe default); checkout = switch the project folder itself to the story branch (refused if it has uncommitted changes)",
+      "default": "worktree"
     },
     "post_comments": {
       "type": "boolean",

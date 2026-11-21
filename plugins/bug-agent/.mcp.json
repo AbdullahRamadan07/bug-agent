@@ -10,6 +10,12 @@
         "AZURE_DEVOPS_ASSIGNED_TO": "${user_config.assigned_to}",
         "AZURE_DEVOPS_STATES": "${user_config.bug_states}",
         "BUG_AGENT_POST_COMMENTS": "${user_config.post_comments}",
+        "BUG_AGENT_WORK_ITEM_TYPES": "${user_config.work_item_types}",
+        "BUG_AGENT_BUG_BRANCH_PREFIX": "${user_config.bug_branch_prefix}",
+        "BUG_AGENT_TASK_BRANCH_PREFIX": "${user_config.task_branch_prefix}",
+        "BUG_AGENT_BASE_BRANCH": "${user_config.base_branch}",
+        "BUG_AGENT_SYNC_BRANCH": "${user_config.sync_branch}",
+        "BUG_AGENT_BRANCH_MODE": "${user_config.branch_mode}",
         "BUG_AGENT_DATA": "${CLAUDE_PLUGIN_DATA}"
       }
     }

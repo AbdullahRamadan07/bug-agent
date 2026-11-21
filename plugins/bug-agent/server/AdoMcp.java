@@ -45,8 +45,39 @@ public class AdoMcp {
     static final String BASE_URL = opt("AZURE_DEVOPS_BASE_URL", "https://dev.azure.com").replaceAll("/+$", "");
     static final Path DATA_DIR = Paths.get(opt("BUG_AGENT_DATA", Paths.get(System.getProperty("user.home"), ".bug-agent").toString()))
             .toAbsolutePath().normalize();
+    /** Work item types treated as the "user story" a bug belongs to (Agile / Scrum / CMMI). */
+    static final Set<String> STORY_TYPES = Arrays.stream(opt("BUG_AGENT_STORY_TYPES", "User Story,Product Backlog Item,Requirement").split(","))
+            .map(s -> s.trim().toLowerCase()).filter(s -> !s.isEmpty()).collect(Collectors.toCollection(LinkedHashSet::new));
+    /** New story branches are named PREFIX + story id, e.g. user-story/12345. */
+    static final String BUG_PREFIX = opt("BUG_AGENT_BUG_BRANCH_PREFIX", "fix/us-");
+    static final String TASK_PREFIX = opt("BUG_AGENT_TASK_BRANCH_PREFIX", "feature/us-");
+    /** Work item types picked up when assigned to the user. */
+    static final List<String> WORK_ITEM_TYPES = Arrays.stream(opt("BUG_AGENT_WORK_ITEM_TYPES", "Bug,Task").split(","))
+            .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
+
+    /** "task" for Task work items, "bug" for everything else. */
+    static String kindOf(String workItemType) {
+        return "task".equalsIgnoreCase(workItemType == null ? "" : workItemType.trim()) ? "task" : "bug";
+    }
+
+    static String prefixFor(String kind) {
+        return "task".equals(kind) ? TASK_PREFIX : BUG_PREFIX;
+    }
+
+    /** The branch family a prefix belongs to: "fix/us-" -> "fix/", "feature/us-" -> "feature/". */
+    static String familyOf(String prefix) {
+        int slash = prefix.indexOf('/');
+        return slash >= 0 ? prefix.substring(0, slash + 1) : prefix;
+    }
+    /** Base for newly created story branches; empty = the remote's default branch (origin/HEAD), else HEAD. */
+    static final String BASE_BRANCH = opt("BUG_AGENT_BASE_BRANCH", "UAT");
+    /** Merged into every newly created branch right after it is cut from BASE_BRANCH; empty = no sync. */
+    static final String SYNC_BRANCH = opt("BUG_AGENT_SYNC_BRANCH", "master");
+    /** worktree = separate folder per branch (developer's checkout untouched); checkout = switch the project folder itself. */
+    static final String BRANCH_MODE = opt("BUG_AGENT_BRANCH_MODE", "worktree").toLowerCase();
     static final Path STATE_FILE = DATA_DIR.resolve("state.json");
     static final Path PROJECTS_FILE = DATA_DIR.resolve("projects.json");
+    static final Path WORKDIRS_FILE = DATA_DIR.resolve("workdirs.json");
     static final HttpClient HTTP = HttpClient.newHttpClient();
 
     // ------------------------------------------------------------------ entry point
@@ -143,7 +174,9 @@ public class AdoMcp {
                 });
 
         tool("list_new_bugs",
-                "List bugs assigned to me in the configured states (default New) that bug-agent has not handled yet, with title, link, priority, description and repro steps. Bugs whose last attempt errored are retried up to the attempt limit.",
+                "List work items (Bugs and Tasks by default; each has a `type`) assigned to me in the configured states (default New) that bug-agent has not handled yet, with title, link, priority, description, repro steps, "
+                        + "and the parent user story (title, description, acceptance criteria) found by walking up the bug's parent links. "
+                        + "Bugs whose last attempt errored are retried up to the attempt limit.",
                 """
                 {"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":50,"default":5}},"additionalProperties":false}
                 """, a -> {
@@ -156,7 +189,7 @@ public class AdoMcp {
                             "bugs", getItems(fresh.subList(0, Math.min(limit, fresh.size()))));
                 });
 
-        tool("get_bug", "Get one bug's details and link by id.",
+        tool("get_bug", "Get one bug's details, link and parent user story (with acceptance criteria) by id.",
                 """
                 {"type":"object","properties":{"id":{"type":"integer"}},"required":["id"],"additionalProperties":false}
                 """, a -> {
@@ -226,19 +259,31 @@ public class AdoMcp {
                 });
 
         tool("prepare_workdir",
-                "Create the place a fixer edits for one bug in one project, without touching the developer's checkout. Git projects: a worktree on branch ai-fix/bug-<id>. Others: an overlay folder pre-filled with copies of `files`. Returns workdir.",
+                "Put one project on the right branch for a work item (Bug or Task) and return the folder the fixer edits. "
+                        + "Git projects with userStoryId: Bugs use an existing " + familyOf(BUG_PREFIX) + "... branch containing the story number, "
+                        + "Tasks an existing " + familyOf(TASK_PREFIX) + "... one (local first, then remote after a fetch); otherwise a new branch "
+                        + BUG_PREFIX + "<storyId> (Bug) or " + TASK_PREFIX + "<storyId> (Task) is created from the default branch. "
+                        + "All bugs of a story share its fix branch, all tasks its feature branch. Without a story: "
+                        + familyOf(BUG_PREFIX) + "bug-<id> or " + familyOf(TASK_PREFIX) + "task-<id>. Branch mode '" + BRANCH_MODE
+                        + "': worktree = separate folder, the developer's checkout is untouched; checkout = switches the project folder itself "
+                        + "(refused if it has uncommitted changes). Non-git projects: an overlay folder pre-filled with copies of `files`.",
                 """
-                {"type":"object","properties":{"bugId":{"type":"integer"},"project":{"type":"string"},
+                {"type":"object","properties":{"bugId":{"type":"integer","description":"The work item id (bug or task)"},"project":{"type":"string"},
+                 "itemType":{"type":"string","enum":["Bug","Task"],"default":"Bug","description":"The work item's type; decides fix/ or feature/ branches"},
+                 "userStoryId":{"type":"integer","description":"Id of the item's parent user story, if it has one"},
                  "files":{"type":"array","items":{"type":"string"},"description":"Project-relative files the plan touches"}},
                  "required":["bugId","project"],"additionalProperties":false}
                 """, a -> prepareWorkdir((long) num(a.get("bugId"), -1), String.valueOf(a.get("project")),
-                        a.get("files") == null ? List.of() : asList(a.get("files")).stream().map(String::valueOf).collect(Collectors.toList())));
+                        a.get("files") == null ? List.of() : asList(a.get("files")).stream().map(String::valueOf).collect(Collectors.toList()),
+                        a.get("userStoryId") == null ? null : (long) num(a.get("userStoryId"), -1),
+                        kindOf(a.get("itemType") == null ? "Bug" : String.valueOf(a.get("itemType")))));
 
         tool("finalize_workdir",
-                "After the fixer finishes: commit the changed files on the worktree branch (git) or prune unchanged copies and write _FIX_NOTES.md (overlay). Returns filesChanged, branch, commit.",
+                "After the fixer finishes: commit the changed files on the bug's branch (one commit per bug, mentioning the user story), "
+                        + "or prune unchanged copies and write _FIX_NOTES.md (overlay). Returns filesChanged, branch, commit.",
                 """
                 {"type":"object","properties":{"bugId":{"type":"integer"},"project":{"type":"string"},"title":{"type":"string"},
-                 "url":{"type":"string"},"rootCause":{"type":"string"},"summary":{"type":"string"}},
+                 "url":{"type":"string"},"rootCause":{"type":"string"},"summary":{"type":"string"},"userStoryTitle":{"type":"string"}},
                  "required":["bugId","project"],"additionalProperties":false}
                 """, AdoMcp::finalizeWorkdir);
 
@@ -247,6 +292,7 @@ public class AdoMcp {
                 {"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"url":{"type":"string"},
                  "outcome":{"type":"string","enum":["fixed","partially_fixed","needs_human","error"]},
                  "rootCause":{"type":"string"},"confidence":{"type":"string"},"notes":{"type":"string"},
+                 "userStoryId":{"type":"integer"},"userStoryTitle":{"type":"string"},"itemType":{"type":"string"},
                  "fixes":{"type":"array","items":{"type":"object"}}},
                  "required":["id","title","outcome"],"additionalProperties":false}
                 """, a -> {
@@ -339,8 +385,9 @@ public class AdoMcp {
         Function<String, String> q = s -> "'" + s.replace("'", "''") + "'";
         String who = assignedTo.trim().equals("@Me") ? "@Me" : q.apply(assignedTo);
         String stateClause = states.stream().map(s -> "[System.State] = " + q.apply(s)).collect(Collectors.joining(" OR "));
+        String types = WORK_ITEM_TYPES.stream().map(q).collect(Collectors.joining(", "));
         return "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = " + q.apply(project) + " "
-                + "AND [System.WorkItemType] = 'Bug' AND [System.AssignedTo] = " + who + " "
+                + "AND [System.WorkItemType] IN (" + types + ") AND [System.AssignedTo] = " + who + " "
                 + "AND (" + stateClause + ") "
                 + "ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] ASC";
     }
@@ -353,20 +400,86 @@ public class AdoMcp {
         return ids;
     }
 
+    /** Raw work items (all fields + links), keyed by id. $expand cannot be combined with a fields list. */
+    static Map<Long, Map<String, Object>> fetchRaw(Collection<Long> ids) {
+        Map<Long, Map<String, Object>> out = new LinkedHashMap<>();
+        List<Long> list = new ArrayList<>(new LinkedHashSet<>(ids));
+        for (int i = 0; i < list.size(); i += 200) {
+            String idList = list.subList(i, Math.min(list.size(), i + 200)).stream().map(String::valueOf).collect(Collectors.joining(","));
+            Object data = ado("GET", orgUrl() + "/_apis/wit/workitems?ids=" + idList + "&$expand=relations&errorPolicy=omit&api-version=7.1", null);
+            for (Object w : asList(asMap(data).get("value"))) {
+                if (w == null) continue;
+                Map<String, Object> wi = asMap(w);
+                out.put((long) num(wi.get("id"), -1), wi);
+            }
+        }
+        return out;
+    }
+
+    /** Parent id from the work item's hierarchy link, or null. */
+    static Long parentOf(Map<String, Object> wi) {
+        for (Object r : asList(wi.get("relations"))) {
+            Map<String, Object> rel = asMap(r);
+            if (!"System.LinkTypes.Hierarchy-Reverse".equals(rel.get("rel"))) continue;
+            String url = str(rel.get("url"));
+            try {
+                return Long.parseLong(url.substring(url.lastIndexOf('/') + 1));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    static String typeOf(Map<String, Object> wi) {
+        return str(asMap(wi.get("fields")).get("System.WorkItemType"));
+    }
+
+    /**
+     * Walks up from a bug's parent to the first User Story / Product Backlog Item / Requirement
+     * (at most 4 levels, e.g. Bug -> Task -> User Story). Results are cached per call.
+     */
+    static Map<String, Object> resolveStory(Long parentId, Map<Long, Map<String, Object>> cache) {
+        List<String> via = new ArrayList<>();
+        Long cur = parentId;
+        for (int depth = 0; cur != null && depth < 4; depth++) {
+            if (!cache.containsKey(cur)) cache.putAll(fetchRaw(List.of(cur)));
+            Map<String, Object> wi = cache.get(cur);
+            if (wi == null) return map("found", false, "note", "parent #" + cur + " could not be read (deleted, or no permission)");
+            String type = typeOf(wi);
+            if (STORY_TYPES.contains(type.toLowerCase())) {
+                Map<String, Object> f = asMap(wi.get("fields"));
+                return map(
+                        "found", true,
+                        "id", cur,
+                        "type", type,
+                        "title", str(f.get("System.Title")),
+                        "state", str(f.get("System.State")),
+                        "url", bugLink(cur),
+                        "via", via,
+                        "description", cut(stripHtml(str(f.get("System.Description"))), 6000),
+                        "acceptanceCriteria", cut(stripHtml(str(f.get("Microsoft.VSTS.Common.AcceptanceCriteria"))), 6000));
+            }
+            via.add(type + " #" + cur);
+            cur = parentOf(wi);
+        }
+        String path = via.isEmpty() ? "" : " (checked " + String.join(" -> ", via) + ")";
+        return map("found", false, "note", (parentId == null ? "the bug has no parent" : "no " + String.join(" / ", STORY_TYPES) + " above the bug") + path);
+    }
+
     static List<Object> getItems(List<Long> ids) {
         if (ids.isEmpty()) return new ArrayList<>();
-        String fields = String.join(",", "System.Title", "System.State", "System.Description", "System.Tags", "System.AreaPath",
-                "Microsoft.VSTS.TCM.ReproSteps", "Microsoft.VSTS.Common.Priority", "Microsoft.VSTS.Common.Severity");
-        String idList = ids.stream().map(String::valueOf).collect(Collectors.joining(","));
-        Object data = ado("GET", orgUrl() + "/_apis/wit/workitems?ids=" + idList + "&fields=" + fields + "&errorPolicy=omit&api-version=7.1", null);
+        Map<Long, Map<String, Object>> raw = fetchRaw(ids);
+        Map<Long, Map<String, Object>> cache = new HashMap<>(raw);
         List<Object> out = new ArrayList<>();
-        for (Object w : asList(asMap(data).get("value"))) {
-            if (w == null) continue;
-            Map<String, Object> wi = asMap(w);
+        for (Long id : ids) { // keep the WIQL priority order
+            Map<String, Object> wi = raw.get(id);
+            if (wi == null) continue;
             Map<String, Object> f = asMap(wi.get("fields"));
-            long id = (long) num(wi.get("id"), -1);
+            Long parent = parentOf(wi);
             out.add(map(
                     "id", id,
+                    "type", str(f.get("System.WorkItemType")),
                     "title", str(f.get("System.Title")),
                     "url", bugLink(id),
                     "state", str(f.get("System.State")),
@@ -375,7 +488,9 @@ public class AdoMcp {
                     "areaPath", str(f.get("System.AreaPath")),
                     "tags", str(f.get("System.Tags")),
                     "description", cut(stripHtml(str(f.get("System.Description"))), 4000),
-                    "reproSteps", cut(stripHtml(str(f.get("Microsoft.VSTS.TCM.ReproSteps"))), 4000)));
+                    "reproSteps", cut(stripHtml(str(f.get("Microsoft.VSTS.TCM.ReproSteps"))), 4000),
+                    "parentId", parent,
+                    "userStory", resolveStory(parent, cache)));
         }
         return out;
     }
@@ -395,37 +510,242 @@ public class AdoMcp {
         throw new IllegalArgumentException("unknown project \"" + name + "\". Configured: " + (known.isEmpty() ? "(none - run /bug-agent:setup)" : known));
     }
 
-    static Map<String, Object> prepareWorkdir(long bugId, String project, List<String> files) {
+    // ---- story branches -------------------------------------------------------------
+
+    /** A branch "has the story number" when the number appears with no digit directly before or after it. */
+    static boolean branchHasNumber(String branch, long storyId) {
+        return Pattern.compile("(?<![0-9])" + storyId + "(?![0-9])").matcher(branch).find();
+    }
+
+    /** Branch of the right type for this story: in the prefix's family (fix/ or feature/) and containing the story number. */
+    static boolean storyBranchMatches(String branch, long storyId, String prefix) {
+        return branch.toLowerCase().startsWith(familyOf(prefix).toLowerCase()) && branchHasNumber(branch, storyId);
+    }
+
+    /**
+     * Finds the branch for a user story and work item type: local branches first, then remote-tracking
+     * branches, only in the type's family (bugs: fix/..., tasks: feature/...). Among several matches it
+     * prefers prefix+id exactly, then the most recently committed one.
+     */
+    static Map<String, Object> findStoryBranch(Path repo, long storyId, String prefix) {
+        List<String[]> local = new ArrayList<>(), remote = new ArrayList<>();
+        for (String l : lines(git(repo, "for-each-ref", "--format=%(refname)|%(committerdate:unix)", "refs/heads", "refs/remotes"))) {
+            String[] parts = l.split("\\|", 2);
+            String ref = parts[0];
+            String ts = parts.length > 1 ? parts[1] : "0";
+            if (ref.startsWith("refs/heads/")) {
+                String name = ref.substring("refs/heads/".length());
+                if (storyBranchMatches(name, storyId, prefix)) local.add(new String[] {name, ts});
+            } else if (ref.startsWith("refs/remotes/") && !ref.endsWith("/HEAD")) {
+                String name = ref.substring("refs/remotes/".length()); // origin/fix/us-123
+                if (storyBranchMatches(name.substring(name.indexOf('/') + 1), storyId, prefix)) remote.add(new String[] {name, ts});
+            }
+        }
+        String preferred = prefix + storyId;
+        Comparator<String[]> best = Comparator
+                .comparing((String[] b) -> !(b[0].equalsIgnoreCase(preferred) || b[0].toLowerCase().endsWith("/" + preferred.toLowerCase())))
+                .thenComparing((String[] b) -> -Long.parseLong(b[1].isBlank() ? "0" : b[1]));
+        local.sort(best);
+        remote.sort(best);
+        List<String> all = new ArrayList<>();
+        local.forEach(b -> all.add(b[0]));
+        remote.forEach(b -> all.add(b[0]));
+        if (!local.isEmpty()) return map("kind", "local", "branch", local.get(0)[0], "matches", all);
+        if (!remote.isEmpty()) {
+            String r = remote.get(0)[0];
+            return map("kind", "remote", "branch", r.substring(r.indexOf('/') + 1), "remoteRef", r, "matches", all);
+        }
+        return null;
+    }
+
+    /**
+     * Brings a just-created branch up to date with SYNC_BRANCH (origin/master preferred) by merging it in.
+     * Only the new branch changes; the base and sync branches are untouched. On a conflict the merge is
+     * aborted, the new branch is removed again, and the error explains it. Returns the ref merged, or null if none exists.
+     */
+    static String syncNewBranch(Path top, Path root, String branch, String mode) {
+        if (SYNC_BRANCH.isEmpty()) return null;
+        String ref = refExists(top, "refs/remotes/origin/" + SYNC_BRANCH) ? "origin/" + SYNC_BRANCH
+                : refExists(top, "refs/heads/" + SYNC_BRANCH) ? SYNC_BRANCH : null;
+        if (ref == null) return null;
+        try {
+            git(root, "-c", "user.name=bug-agent", "-c", "user.email=bug-agent@localhost", "merge", "--no-edit", ref);
+            return ref;
+        } catch (RuntimeException e) {
+            try { git(root, "merge", "--abort"); } catch (RuntimeException ignored) {}
+            try {
+                if ("worktree".equals(mode)) git(top, "worktree", "remove", "--force", root.toString());
+                else git(top, "checkout", "-");
+                git(top, "branch", "-D", branch);
+            } catch (RuntimeException ignored) {}
+            throw new IllegalStateException("new branch " + branch + " was cut from " + baseRef(top) + " but merging " + ref
+                    + " into it conflicts, so it was removed again. Sync " + BASE_BRANCH + " with " + SYNC_BRANCH + " by hand, then run the cycle again.");
+        }
+    }
+
+    /** Base for a new branch: BASE_BRANCH (preferring origin/BASE), else origin/HEAD, else HEAD. */
+    static String baseRef(Path repo) {
+        if (!BASE_BRANCH.isEmpty()) {
+            if (refExists(repo, "refs/remotes/origin/" + BASE_BRANCH)) return "origin/" + BASE_BRANCH;
+            if (refExists(repo, "refs/heads/" + BASE_BRANCH)) return BASE_BRANCH;
+            // no UAT in this repository: fall through to its default branch (the result's branchSource names the base used)
+        }
+        try {
+            return git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD");
+        } catch (RuntimeException e) {
+            return "HEAD";
+        }
+    }
+
+    static boolean refExists(Path repo, String ref) {
+        try {
+            git(repo, "show-ref", "--verify", "--quiet", ref);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Folder where `branch` is currently checked out (main checkout or a worktree), or null. */
+    static Path checkedOutAt(Path repo, String branch) {
+        Path cur = null;
+        for (String l : lines(git(repo, "worktree", "list", "--porcelain"))) {
+            if (l.startsWith("worktree ")) cur = Paths.get(l.substring(9)).toAbsolutePath().normalize();
+            else if (l.equals("branch refs/heads/" + branch)) return cur;
+        }
+        return null;
+    }
+
+    static boolean hasTrackedChanges(Path dir) {
+        return !git(dir, "status", "--porcelain", "--untracked-files=no").isEmpty();
+    }
+
+    /** Best effort: refresh remote branches so an existing story branch on the server is found. Never prompts. */
+    static String tryFetch(Path repo) {
+        if (git(repo, "remote").isEmpty()) return null;
+        try {
+            gitTimed(repo, 60, "fetch", "--all", "--prune", "--quiet");
+            return null;
+        } catch (RuntimeException e) {
+            return "git fetch failed, using the branches already known locally: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Gets a git project onto the right branch for this work item and returns where the fixer edits.
+     * With a user story: an existing branch of the item's type containing the story number, or a new
+     * prefix+storyId branch (bugs: fix/us-<story>, tasks: feature/us-<story>).
+     * Without one: fix/bug-<id> or feature/task-<id>.
+     */
+    static Map<String, Object> prepareGit(Path top, Path src, long bugId, Long storyId, String kind) throws IOException {
+        Path sub = top.relativize(src);
+        String prefix = prefixFor(kind);
+        String fetchWarning = tryFetch(top); // latest remote branches, UAT and master
+        Map<String, Object> found = storyId != null ? findStoryBranch(top, storyId, prefix) : null;
+        String branch;
+        String source;
+        List<String> createArgs; // args after "worktree add <dir>" or "checkout"
+        if (found != null && "local".equals(found.get("kind"))) {
+            branch = String.valueOf(found.get("branch"));
+            source = "existing local branch";
+            createArgs = List.of(branch);
+        } else if (found != null) {
+            branch = String.valueOf(found.get("branch"));
+            source = "existing remote branch " + found.get("remoteRef");
+            createArgs = List.of("--track", "-b", branch, String.valueOf(found.get("remoteRef")));
+        } else {
+            branch = storyId != null ? prefix + storyId : familyOf(prefix) + kind + "-" + bugId;
+            if (storyId == null && refExists(top, "refs/heads/" + branch)) {
+                source = "existing local branch"; // a retry of the same work item
+                createArgs = List.of(branch);
+            } else {
+                String base = baseRef(top);
+                source = "new branch from " + base;
+                createArgs = List.of("-b", branch, base);
+            }
+        }
+
+        Path root;
+        String mode;
+        Path already = refExists(top, "refs/heads/" + branch) ? checkedOutAt(top, branch) : null;
+        if (already != null) {
+            // The branch is already open in a folder: work there, as long as nothing uncommitted would get mixed in.
+            if (hasTrackedChanges(already) && !already.startsWith(DATA_DIR))
+                throw new IllegalStateException("branch " + branch + " is checked out at " + already
+                        + " with uncommitted changes; commit or stash them, then run the cycle again");
+            root = already;
+            mode = already.startsWith(DATA_DIR) ? "worktree" : "checkout";
+            source = source + " (already checked out at " + already + ")";
+        } else if ("checkout".equals(BRANCH_MODE)) {
+            if (hasTrackedChanges(top))
+                throw new IllegalStateException(top + " has uncommitted changes; commit or stash them before bug-agent switches it to " + branch);
+            List<String> args = new ArrayList<>(List.of("checkout"));
+            args.addAll(createArgs);
+            git(top, args.toArray(new String[0]));
+            root = top;
+            mode = "checkout";
+        } else {
+            String key = storyId != null ? "story-" + storyId + "-" + kind : kind + "-" + bugId; // bug and task work of a story use different branches
+            root = DATA_DIR.resolve("worktrees").resolve(safeName(top.getFileName().toString()) + "-" + key);
+            Files.createDirectories(root.getParent());
+            List<String> args = new ArrayList<>(List.of("worktree", "add"));
+            if (createArgs.size() == 1) { args.add(root.toString()); args.add(createArgs.get(0)); }
+            else { args.addAll(createArgs.subList(0, createArgs.size() - 1)); args.add(root.toString()); args.add(createArgs.get(createArgs.size() - 1)); }
+            git(top, args.toArray(new String[0]));
+            mode = "worktree";
+        }
+        String synced = null;
+        if (already == null && source.startsWith("new branch")) {
+            synced = syncNewBranch(top, root, branch, mode);
+            if (synced != null) source = source + ", synced with " + synced;
+        }
+        Map<String, Object> out = map("mode", mode, "workdir", root.resolve(sub).normalize().toString(), "branch", branch,
+                "branchSource", source, "sourcePath", src.toString());
+        if (synced == null && !SYNC_BRANCH.isEmpty() && already == null && source.startsWith("new branch"))
+            out.put("syncWarning", "sync branch '" + SYNC_BRANCH + "' not found; the new branch was not synced");
+        out.put("untrackedBefore", lines(git(root, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard")));
+        if (storyId != null) out.put("userStoryId", storyId);
+        out.put("kind", kind);
+        if (found != null && asList(found.get("matches")).size() > 1) out.put("otherMatchingBranches", asList(found.get("matches")).subList(1, asList(found.get("matches")).size()));
+        if (fetchWarning != null) out.put("warning", fetchWarning);
+        return out;
+    }
+
+    static Map<String, Object> prepareWorkdir(long bugId, String project, List<String> files, Long storyId, String kind) {
         Map<String, Object> p = projectByName(project);
         Path src = Paths.get(String.valueOf(p.get("path")));
         String mode = String.valueOf(p.getOrDefault("applyMode", "auto"));
         Path top = "overlay".equals(mode) ? null : gitTop(src);
         if ("worktree".equals(mode) && top == null) throw new IllegalArgumentException(src + " is not a git repository");
         try {
+            Map<String, Object> w;
             if (top != null) {
-                Path sub = top.relativize(src);
-                Path wtDir = DATA_DIR.resolve("worktrees").resolve(safeName(top.getFileName().toString()) + "-bug-" + bugId);
-                String branch = "ai-fix/bug-" + bugId;
-                if (Files.exists(wtDir)) {
-                    branch = git(wtDir, "rev-parse", "--abbrev-ref", "HEAD");
-                } else {
-                    Files.createDirectories(wtDir.getParent());
-                    if (!git(top, "branch", "--list", branch).isEmpty()) branch = branch + "-" + Long.toString(System.currentTimeMillis(), 36);
-                    git(top, "worktree", "add", "-b", branch, wtDir.toString(), "HEAD");
+                w = prepareGit(top, src, bugId, storyId, kind);
+            } else {
+                Path overlay = DATA_DIR.resolve("patches");
+                if (storyId != null) overlay = overlay.resolve("story-" + storyId);
+                overlay = overlay.resolve(kind + "-" + bugId).resolve(safeName(project));
+                for (String rel : files) {
+                    Path from = inside(src, rel);
+                    Path to = inside(overlay, rel);
+                    if (Files.exists(from) && !Files.exists(to)) {
+                        Files.createDirectories(to.getParent());
+                        Files.copy(from, to);
+                    }
                 }
-                return map("mode", "worktree", "workdir", wtDir.resolve(sub).normalize().toString(), "branch", branch, "sourcePath", src.toString());
+                Files.createDirectories(overlay);
+                w = map("mode", "overlay", "workdir", overlay.toString(), "sourcePath", src.toString());
+                if (storyId != null) w.put("userStoryId", storyId);
+                w.put("kind", kind);
             }
-            Path overlay = DATA_DIR.resolve("patches").resolve("bug-" + bugId).resolve(safeName(project));
-            for (String rel : files) {
-                Path from = inside(src, rel);
-                Path to = inside(overlay, rel);
-                if (Files.exists(from) && !Files.exists(to)) {
-                    Files.createDirectories(to.getParent());
-                    Files.copy(from, to);
-                }
-            }
-            Files.createDirectories(overlay);
-            return map("mode", "overlay", "workdir", overlay.toString(), "sourcePath", src.toString());
+            // Remember it so finalize_workdir commits in exactly this place.
+            Object saved = readJson(WORKDIRS_FILE);
+            Map<String, Object> all = saved instanceof Map ? asMap(saved) : new LinkedHashMap<>();
+            all.put(bugId + "|" + project, w);
+            writeJson(WORKDIRS_FILE, all);
+            Map<String, Object> ret = new LinkedHashMap<>(w);
+            ret.remove("untrackedBefore"); // internal bookkeeping, not for the model
+            return ret;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -435,25 +755,43 @@ public class AdoMcp {
         long bugId = (long) num(a.get("bugId"), -1);
         String project = String.valueOf(a.get("project"));
         String title = strOr(a.get("title")), url = strOr(a.get("url")), rootCause = strOr(a.get("rootCause")), summary = strOr(a.get("summary"));
+        String storyTitle = strOr(a.get("userStoryTitle"));
         Map<String, Object> p = projectByName(project);
-        Map<String, Object> w = prepareWorkdir(bugId, project, List.of());
+        Object saved = readJson(WORKDIRS_FILE);
+        Object entry = saved instanceof Map ? asMap(saved).get(bugId + "|" + project) : null;
+        if (!(entry instanceof Map)) throw new IllegalStateException("call prepare_workdir for bug " + bugId + " in " + project + " first");
+        Map<String, Object> w = asMap(entry);
+        Object storyId = w.get("userStoryId");
+        boolean task = "task".equals(w.get("kind"));
+        String itemLabel = (task ? "task #" : "bug #") + bugId;
         Path workdir = Paths.get(String.valueOf(w.get("workdir")));
         try {
-            if ("worktree".equals(w.get("mode"))) {
+            if (!"overlay".equals(w.get("mode"))) {
                 Path wtRoot = gitTop(workdir);
                 String sub = wtRoot.relativize(workdir).toString().replace('\\', '/');
                 String scope = sub.isEmpty() ? "." : sub;
                 LinkedHashSet<String> changed = new LinkedHashSet<>();
                 changed.addAll(lines(git(wtRoot, "-c", "core.quotepath=false", "diff", "--name-only", "HEAD", "--", scope)));
-                changed.addAll(lines(git(wtRoot, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "--", scope)));
-                if (changed.isEmpty()) return map("mode", "worktree", "branch", w.get("branch"), "filesChanged", List.of(), "commit", null);
+                Set<String> before = new HashSet<>();
+                for (Object o : asList(w.get("untrackedBefore"))) before.add(String.valueOf(o));
+                for (String u : lines(git(wtRoot, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "--", scope)))
+                    if (!before.contains(u)) changed.add(u); // never sweep the developer's own untracked files into the commit
+                Map<String, Object> out = map("mode", w.get("mode"), "workdir", workdir.toString(), "branch", w.get("branch"));
+                if (storyId != null) out.put("userStoryId", storyId);
+                if (changed.isEmpty()) {
+                    out.put("filesChanged", List.of());
+                    out.put("commit", null);
+                    return out;
+                }
                 List<String> add = new ArrayList<>(List.of("add", "--"));
                 add.addAll(changed);
                 git(wtRoot, add.toArray(new String[0]));
-                String msg = ("fix: bug #" + bugId + " " + title + "\n\n" + rootCause + "\n\n" + summary + "\n\n" + url).trim();
+                String story = storyId == null ? "" : "\n\nUser story #" + storyId + (storyTitle.isEmpty() ? "" : ": " + storyTitle);
+                String msg = ((task ? "feat: " : "fix: ") + itemLabel + " " + title + story + "\n\n" + rootCause + "\n\n" + summary + "\n\n" + url).trim();
                 git(wtRoot, "-c", "user.name=bug-agent", "-c", "user.email=bug-agent@localhost", "commit", "-m", msg);
-                return map("mode", "worktree", "workdir", workdir.toString(), "branch", w.get("branch"),
-                        "commit", git(wtRoot, "rev-parse", "--short", "HEAD"), "filesChanged", new ArrayList<>(changed));
+                out.put("commit", git(wtRoot, "rev-parse", "--short", "HEAD"));
+                out.put("filesChanged", new ArrayList<>(changed));
+                return out;
             }
             // overlay: keep only files that differ from the original, then write notes
             Path src = Paths.get(String.valueOf(p.get("path")));
@@ -470,12 +808,16 @@ public class AdoMcp {
                 else changed.add(rel);
             }
             if (!changed.isEmpty()) {
-                String notes = "# Bug #" + bugId + ": " + title + "\n\n" + url + "\n\nCopy these files into " + src + " after review.\n\n"
+                String notes = "# " + (task ? "Task #" : "Bug #") + bugId + ": " + title + "\n\n" + url
+                        + (storyId == null ? "" : "\n\nUser story #" + storyId + (storyTitle.isEmpty() ? "" : ": " + storyTitle))
+                        + "\n\nCopy these files into " + src + " after review.\n\n"
                         + "## Root cause\n" + rootCause + "\n\n## Changes\n" + summary + "\n\n## Files\n"
                         + changed.stream().map(f -> "- " + f).collect(Collectors.joining("\n")) + "\n";
                 Files.writeString(workdir.resolve("_FIX_NOTES.md"), notes, StandardCharsets.UTF_8);
             }
-            return map("mode", "overlay", "workdir", workdir.toString(), "filesChanged", changed);
+            Map<String, Object> out = map("mode", "overlay", "workdir", workdir.toString(), "filesChanged", changed);
+            if (storyId != null) out.put("userStoryId", storyId);
+            return out;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -483,15 +825,35 @@ public class AdoMcp {
 
     // ------------------------------------------------------------------ git / files
     static String git(Path cwd, String... args) {
+        return gitTimed(cwd, 0, args);
+    }
+
+    /** Runs git (never interactive). timeoutSeconds 0 = no limit. */
+    static String gitTimed(Path cwd, int timeoutSeconds, String... args) {
         List<String> cmd = new ArrayList<>();
         cmd.add("git");
         cmd.addAll(Arrays.asList(args));
         try {
-            Process proc = new ProcessBuilder(cmd).directory(cwd.toFile()).redirectInput(ProcessBuilder.Redirect.from(nullFile())).start();
-            byte[] out = proc.getInputStream().readAllBytes();
-            byte[] err = proc.getErrorStream().readAllBytes();
-            if (proc.waitFor() != 0)
-                throw new IllegalStateException("git " + String.join(" ", args) + " failed: " + new String(err, StandardCharsets.UTF_8).trim());
+            ProcessBuilder pb = new ProcessBuilder(cmd).directory(cwd.toFile()).redirectInput(ProcessBuilder.Redirect.from(nullFile()));
+            pb.environment().put("GIT_TERMINAL_PROMPT", "0"); // fail instead of waiting for a password
+            File errFile = File.createTempFile("bug-agent-git", ".err");
+            pb.redirectError(errFile);
+            Process proc = pb.start();
+            byte[] out;
+            if (timeoutSeconds > 0) {
+                if (!proc.waitFor(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)) {
+                    proc.destroyForcibly();
+                    errFile.delete();
+                    throw new IllegalStateException("git " + args[0] + " timed out after " + timeoutSeconds + "s");
+                }
+                out = proc.getInputStream().readAllBytes();
+            } else {
+                out = proc.getInputStream().readAllBytes();
+                proc.waitFor();
+            }
+            String err = Files.readString(errFile.toPath(), StandardCharsets.UTF_8).trim();
+            errFile.delete();
+            if (proc.exitValue() != 0) throw new IllegalStateException("git " + String.join(" ", args) + " failed: " + err);
             return new String(out, StandardCharsets.UTF_8).trim();
         } catch (IOException | InterruptedException e) {
             throw new IllegalStateException("could not run git: " + e.getMessage());

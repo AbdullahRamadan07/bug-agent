@@ -18,7 +18,7 @@ Call the `check_connection` tool from the bug-agent `ado` MCP server.
 1. Call `get_projects` and show what is configured.
 2. Work out the folders to use: the arguments above, or ask the user for the folders that hold the code these bugs live in (backend, frontend, other services). A parent folder is fine; then list its subfolders and propose the ones that look like projects.
 3. For each folder, look at its top level and README / build files (package.json, pom.xml, *.csproj, angular.json, docker-compose.yml) to draft a one-line description: language and framework, what it does, and which other project it talks to. The planner uses these descriptions to route bugs, so make them specific.
-4. Propose names (letters, digits, `.`, `_`, `-`), paths and descriptions, and let the user correct them. Use `applyMode` `auto` unless the user asks otherwise; git projects then get fixes on `ai-fix/bug-<id>` branches in a separate worktree, and other folders get reviewable copies under the plugin's data folder.
+4. Propose names (letters, digits, `.`, `_`, `-`), paths and descriptions, and let the user correct them. Use `applyMode` `auto` unless the user asks otherwise; in git projects, tasks are then committed on `feature/us-<story>` and bugs on `fix/us-<story>` branches (new ones cut from UAT and synced with master) in a separate worktree, and other folders get reviewable copies under the plugin's data folder.
 5. Save with `set_projects` and show the result, including which projects are git repositories.
 
 ## 3. Next steps
