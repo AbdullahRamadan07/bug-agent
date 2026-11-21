@@ -1,7 +1,7 @@
 {
   "name": "bug-agent",
-  "version": "1.3.0",
-  "description": "Hourly Azure DevOps agent: a Haiku intake agent pulls New Bugs and Tasks assigned to you with their user story, an Opus agent plans the fix or implementation against the story's acceptance criteria, and Sonnet agents commit it on fix/us-<story> or feature/us-<story> branches for review.",
+  "version": "2.1.0",
+  "description": "Hourly Azure DevOps agent, one user story per cycle: Haiku pulls the story's New Bugs or Tasks assigned to you, Opus plans each against the acceptance criteria, Sonnet applies it live in your project on fix/us-<story> or feature/us-<story>, Opus reviews it, and you get a report outside the project plus a review alert. Nothing is committed: you review and commit.",
   "author": { "name": "bug-agent maintainers" },
   "keywords": ["azure-devops", "bugs", "agents", "automation"],
   "userConfig": {
@@ -38,11 +38,31 @@
     },
     "max_bugs_per_cycle": {
       "type": "number",
-      "title": "Max work items per cycle",
-      "description": "Bugs and Tasks beyond this wait for the next cycle",
-      "default": 3,
+      "title": "Max work items per user story",
+      "description": "Each cycle works on one user story; at most this many of its Bugs (or Tasks), the rest wait for the next cycle",
+      "default": 10,
       "min": 1,
-      "max": 20
+      "max": 30
+    },
+    "auto_commit": {
+      "type": "boolean",
+      "title": "Commit automatically",
+      "description": "Off (default): changes stay uncommitted in your project for you to review and commit; the next user story waits until you do. On: one commit per item, no review gate",
+      "default": false
+    },
+    "review_alert_minutes": {
+      "type": "number",
+      "title": "Review alert after (minutes)",
+      "description": "Desktop notification this long after a user story's work is done: ready for staging or not, and whether you've reviewed it yet",
+      "default": 15,
+      "min": 1,
+      "max": 240
+    },
+    "report_dir": {
+      "type": "directory",
+      "title": "Report folder",
+      "description": "Where reports (.md) and full diffs (.patch) are saved, outside your projects. Empty = the plugin's data folder/reports",
+      "default": ""
     },
     "work_item_types": {
       "type": "string",
@@ -64,21 +84,21 @@
     },
     "base_branch": {
       "type": "string",
-      "title": "Base branch for new branches",
-      "description": "Every new branch is cut from this branch (origin/<name> preferred). If a repository has no such branch, its default branch is used. Empty = the remote's default branch",
-      "default": "UAT"
+      "title": "Base branch override",
+      "description": "Empty (default) = every new branch is cut from each repository's own root branch, detected automatically (main, master, trunk, ...). Set a name (e.g. UAT) only to cut from that branch instead; repositories without it still use their root branch",
+      "default": ""
     },
     "sync_branch": {
       "type": "string",
-      "title": "Sync new branches with",
-      "description": "Merged into each new branch right after it is cut from the base branch, so it starts as base + latest master. On a merge conflict the new branch is removed and the item is reported for a human. Empty = no sync",
-      "default": "master"
+      "title": "Sync new branches with (optional)",
+      "description": "Empty (default) = no sync, since new branches already start from the root branch. Only useful with a base branch override, e.g. base UAT + sync master. On a merge conflict the new branch is removed and the item goes to a human",
+      "default": ""
     },
     "branch_mode": {
       "type": "string",
       "title": "Branch mode",
-      "description": "worktree = open the story branch in a separate folder and leave your checkout alone (safe default); checkout = switch the project folder itself to the story branch (refused if it has uncommitted changes)",
-      "default": "worktree"
+      "description": "checkout (default) = switch your project folder itself to the story branch so you watch the changes live in your IDE (refused if it has uncommitted changes of your own); worktree = use a separate folder and leave your checkout alone",
+      "default": "checkout"
     },
     "post_comments": {
       "type": "boolean",

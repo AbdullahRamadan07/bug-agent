@@ -16,6 +16,10 @@
         "BUG_AGENT_BASE_BRANCH": "${user_config.base_branch}",
         "BUG_AGENT_SYNC_BRANCH": "${user_config.sync_branch}",
         "BUG_AGENT_BRANCH_MODE": "${user_config.branch_mode}",
+        "BUG_AGENT_AUTO_COMMIT": "${user_config.auto_commit}",
+        "BUG_AGENT_REVIEW_ALERT_MINUTES": "${user_config.review_alert_minutes}",
+        "BUG_AGENT_REPORT_DIR": "${user_config.report_dir}",
+        "BUG_AGENT_SERVER_FILE": "${CLAUDE_PLUGIN_ROOT}/server/AdoMcp.java",
         "BUG_AGENT_DATA": "${CLAUDE_PLUGIN_DATA}"
       }
     }

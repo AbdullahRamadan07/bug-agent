@@ -95,6 +95,9 @@ const ENV = (dataDir, extra = {}) => ({
   AZURE_DEVOPS_BASE_URL: baseUrl,
   BUG_AGENT_DATA: dataDir,
   BUG_AGENT_POST_COMMENTS: "false",
+  BUG_AGENT_AUTO_COMMIT: "true",
+  BUG_AGENT_BRANCH_MODE: "worktree",
+  BUG_AGENT_NOTIFY: "log",
   ...extra,
 });
 
@@ -104,7 +107,7 @@ test("speaks MCP: initialize and tools/list", async () => {
   assert.equal(init.result.serverInfo.name, "bug-agent-ado");
   const list = await s.rpc("tools/list", {});
   const names = list.result.tools.map((t) => t.name);
-  for (const n of ["check_connection", "list_new_bugs", "get_bug", "add_comment", "get_projects", "set_projects", "prepare_workdir", "finalize_workdir", "record_bug", "reset_bug", "history"])
+  for (const n of ["check_connection", "list_new_bugs", "get_bug", "add_comment", "get_projects", "set_projects", "prepare_workdir", "finalize_workdir", "record_bug", "reset_bug", "history", "review_branches", "checkout_branch", "review_gate", "start_unit", "unit_patch", "finish_unit"])
     assert.ok(names.includes(n), n);
   assert.equal((await s.rpc("nope", {})).error.code, -32601);
   s.stop();
@@ -370,13 +373,13 @@ function makeUatRepo(name, { conflict = false } = {}) {
   return { repo, sub: path.join(repo, "api"), g: (...a) => g(repo, ...a) };
 }
 
-test("tasks go on feature/us-<story>, bugs on fix/us-<story>: new branches start from UAT with master merged in", async () => {
+test("tasks go on feature/us-<story>, bugs on fix/us-<story>; with base_branch=UAT + sync_branch=master new branches start from UAT with master merged in", async () => {
   const { repo, sub, g } = makeUatRepo("uat");
   const uatBefore = g("rev-parse", "origin/UAT");
   const masterBefore = g("rev-parse", "origin/master");
   const s = startServer(ENV(path.join(tmp, "d9"), {
-    BUG_AGENT_BASE_BRANCH: "${user_config.base_branch}", // unset -> UAT
-    BUG_AGENT_SYNC_BRANCH: "${user_config.sync_branch}", // unset -> master
+    BUG_AGENT_BASE_BRANCH: "UAT",
+    BUG_AGENT_SYNC_BRANCH: "master",
   }));
   await s.call("set_projects", { projects: [{ name: "api", path: sub, description: "Fees API" }] });
 
@@ -424,5 +427,238 @@ test("a sync conflict between UAT and master is refused and leaves no branch beh
   assert.match(r.error, /new branch fix\/us-6200 was cut from origin\/UAT but merging origin\/master into it conflicts/);
   assert.equal(g("branch", "--list", "fix/us-6200"), "");
   assert.ok(!g("worktree", "list").includes("story-6200"), "worktree removed");
+  s.stop();
+});
+
+// ---------------------------------------------------------------- review: release worktrees, list, check out in every project
+test("review: branches are listed per story, and checked out in every project they touch", async () => {
+  const be = makeUatRepo("rev-be");
+  const fe = makeUatRepo("rev-fe");
+  const data = path.join(tmp, "d11");
+  const s = startServer(ENV(data));
+  await s.call("set_projects", { projects: [
+    { name: "backend", path: be.sub, description: "API" },
+    { name: "frontend", path: fe.sub, description: "UI" },
+  ] });
+
+  // bug 91 of story 7000 needs a change in both projects
+  for (const [name, repo] of [["backend", be], ["frontend", fe]]) {
+    const w = await s.call("prepare_workdir", { bugId: 91, project: name, itemType: "Bug", userStoryId: 7000, files: [] });
+    fs.writeFileSync(path.join(w.workdir, "fees.txt"), `fee fixed in ${name}\n`);
+    const f = await s.call("finalize_workdir", { bugId: 91, project: name, title: "Wrong fee", url: "https://x/91", userStoryTitle: "Refunds" });
+    assert.equal(f.worktreeReleased, undefined, "worktree is kept");
+    assert.equal(repo.g("log", "-1", "--format=%s", "fix/us-7000"), "fix: bug #91 Wrong fee", `${name}: branch kept with its commit`);
+  }
+
+  // story 7100: bug-agent still holds the branch in its worktree (prepared, not finalized)
+  await s.call("prepare_workdir", { bugId: 92, project: "backend", itemType: "Bug", userStoryId: 7100, files: [] });
+
+  const overview = await s.call("review_branches", { userStoryId: 7000 });
+  assert.equal(overview.branches.length, 1);
+  const br = overview.branches[0];
+  assert.equal(br.branch, "fix/us-7000");
+  assert.equal(br.type, "fix");
+  assert.equal(br.userStoryId, 7000);
+  assert.deepEqual(br.items.map((i) => [i.id, i.type, i.title]), [[91, "Bug", "Wrong fee"]]);
+  assert.deepEqual(br.projects.map((p) => [p.project, p.branchExists, p.checkedOut, p.projectIsOn]), [
+    ["backend", true, "in a bug-agent worktree (checkout_branch frees it)", "master"],
+    ["frontend", true, "in a bug-agent worktree (checkout_branch frees it)", "master"],
+  ]);
+  assert.equal(br.projects[0].base, "origin/master"); // the repository's root branch
+  assert.deepEqual(br.projects[0].commits.map((c) => c.replace(/^\w+ /, "")), ["fix: bug #91 Wrong fee"]); // sync merge left out
+  assert.deepEqual(br.projects[0].files, ["api/fees.txt"]);
+
+  // frontend has uncommitted work: it is left alone, backend is switched
+  fs.appendFileSync(path.join(fe.sub, "fees.txt"), "developer wip\n");
+  const r1 = await s.call("checkout_branch", { branch: "fix/us-7000" });
+  const byName = (r) => Object.fromEntries(r.projects.map((p) => [p.project, p]));
+  assert.match(byName(r1).backend.result, /^checked out fix\/us-7000 \(was master\)/);
+  assert.equal(byName(r1).backend.previousBranch, "master");
+  assert.deepEqual(byName(r1).backend.files, ["api/fees.txt"]);
+  assert.match(byName(r1).frontend.result, /^refused: .* has uncommitted changes on master/);
+  assert.equal(be.g("branch", "--show-current"), "fix/us-7000");
+  assert.equal(fs.readFileSync(path.join(be.sub, "fees.txt"), "utf8").replace(/\r\n/g, "\n"), "fee fixed in backend\n");
+  assert.equal(fe.g("branch", "--show-current"), "master");
+  assert.match(fs.readFileSync(path.join(fe.sub, "fees.txt"), "utf8"), /developer wip/, "developer's change untouched");
+
+  fe.g("checkout", "--", "api/fees.txt");
+  const r2 = await s.call("checkout_branch", { branch: "fix/us-7000" });
+  assert.equal(byName(r2).backend.result, "already on fix/us-7000");
+  assert.match(byName(r2).frontend.result, /^checked out fix\/us-7000/);
+  assert.equal(fe.g("branch", "--show-current"), "fix/us-7000");
+
+  // a branch still held by a bug-agent worktree is freed, then checked out
+  const r3 = await s.call("checkout_branch", { branch: "fix/us-7100" });
+  assert.match(byName(r3).backend.result, /^checked out fix\/us-7100/);
+  assert.ok(!be.g("worktree", "list").includes("story-7100"));
+
+  // and back again
+  const r4 = await s.call("checkout_branch", { branch: "master", projects: ["backend", "frontend"] });
+  assert.match(byName(r4).backend.result, /checked out master/);
+  assert.match(byName(r4).frontend.result, /checked out master/);
+  assert.equal(be.g("branch", "--show-current"), "master");
+  assert.equal(fe.g("branch", "--show-current"), "master");
+  s.stop();
+});
+
+// ---------------------------------------------------------------- live flow: uncommitted changes in the IDE folder, report, alert, review gate
+const SERVER_FILE = SERVER;
+async function waitFor(fn, ms = 30000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const v = fn();
+    if (v) return v;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return fn();
+}
+
+test("live flow: one user story per cycle, changes left uncommitted in the project folder, report outside it, alert, then the gate", async () => {
+  const be = makeUatRepo("live-be");
+  const fe = makeUatRepo("live-fe");
+  const data = path.join(tmp, "d12");
+  const reports = path.join(tmp, "reports-outside");
+  const env = ENV(data, {
+    BUG_AGENT_AUTO_COMMIT: "${user_config.auto_commit}", // unset -> false
+    BUG_AGENT_BRANCH_MODE: "${user_config.branch_mode}", // unset -> checkout
+    BUG_AGENT_REVIEW_ALERT_MINUTES: "0.03",              // ~2 s instead of 15 min
+    BUG_AGENT_REPORT_DIR: reports,
+    BUG_AGENT_SERVER_FILE: SERVER_FILE,
+  });
+  let s = startServer(env);
+  await s.call("set_projects", { projects: [
+    { name: "backend", path: be.sub, description: "API" },
+    { name: "frontend", path: fe.sub, description: "UI" },
+  ] });
+
+  assert.equal((await s.call("review_gate")).canStartNewWork, true);
+  const unit = await s.call("start_unit", { userStoryId: 9000, userStoryTitle: "Refunds", itemType: "Bug",
+    items: [{ id: 101, title: "Wrong fee" }, { id: 102, title: "Missing label" }] });
+  assert.match(unit.unitId, /^US-9000-fix-/);
+  assert.match(unit.commits, /uncommitted/);
+
+  // bug 101: backend folder itself switches to fix/us-9000 (what the IDE shows), edits stay uncommitted
+  const w1 = await s.call("prepare_workdir", { bugId: 101, project: "backend", itemType: "Bug", userStoryId: 9000, unitId: unit.unitId, files: ["fees.txt"] });
+  assert.equal(w1.mode, "checkout");
+  assert.equal(path.resolve(w1.workdir), path.resolve(be.sub));
+  assert.equal(be.g("branch", "--show-current"), "fix/us-9000");
+  const head = be.g("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(be.sub, "fees.txt"), "fee = 0\n");
+  const f1 = await s.call("finalize_workdir", { bugId: 101, project: "backend", title: "Wrong fee", url: "https://x/101", summary: "fee set to 0" });
+  assert.equal(f1.committed, false);
+  assert.deepEqual(f1.filesChanged, ["api/fees.txt"]);
+  assert.equal(be.g("rev-parse", "HEAD"), head, "nothing committed");
+
+  // bug 102 of the same story: the backend's uncommitted changes are this unit's own, so it continues on top
+  const w2 = await s.call("prepare_workdir", { bugId: 102, project: "backend", itemType: "Bug", userStoryId: 9000, unitId: unit.unitId, files: [] });
+  assert.equal(w2.branch, "fix/us-9000");
+  fs.writeFileSync(path.join(be.sub, "label.txt"), "Net refund\n");
+  const f2 = await s.call("finalize_workdir", { bugId: 102, project: "backend", title: "Missing label" });
+  assert.deepEqual(f2.filesChanged, ["api/label.txt"], "only this bug's file, not bug 101's");
+  const w3 = await s.call("prepare_workdir", { bugId: 102, project: "frontend", itemType: "Bug", userStoryId: 9000, unitId: unit.unitId, files: [] });
+  assert.equal(fe.g("branch", "--show-current"), "fix/us-9000");
+  fs.writeFileSync(path.join(fe.sub, "fees.txt"), "show net refund\n");
+  await s.call("finalize_workdir", { bugId: 102, project: "frontend", title: "Missing label" });
+
+  // patch for the reviewer, then the report; both outside the projects
+  const p = await s.call("unit_patch", { unitId: unit.unitId });
+  assert.ok(p.patchPath.startsWith(reports));
+  const patch = fs.readFileSync(p.patchPath, "utf8");
+  assert.match(patch, /\+fee = 0/);
+  assert.match(patch, /new file mode 100644\n--- \/dev\/null\n\+\+\+ b\/api\/label.txt\n@@ -0,0 \+1,1 @@\n\+Net refund/);
+  assert.match(patch, /\+show net refund/);
+
+  const fin = await s.call("finish_unit", { unitId: unit.unitId, readyForStaging: false, verdictSummary: "label not localized",
+    issues: ["label.txt is not localized"], reportMarkdown: "# US-9000 Refunds\n\n## What changed\n- #101 fee fixed\n- #102 label added" });
+  assert.equal(fin.status, "pending_review");
+  assert.ok(fin.reportPath.startsWith(reports) && !fin.reportPath.startsWith(be.repo));
+  const report = fs.readFileSync(fin.reportPath, "utf8");
+  assert.match(report, /## What changed/);
+  assert.match(report, /on branch `fix\/us-9000`: \d+ changed, \d+ new file\(s\), not committed/);
+  assert.match(report, /Agent review: \*\*not ready for staging\*\* - label not localized/);
+  assert.equal(fin.alertWarning, undefined);
+
+  // the alert process is detached: it fires even though the server is gone
+  s.stop();
+  const alerts = path.join(data, "alerts.log");
+  const line = await waitFor(() => fs.existsSync(alerts) && fs.readFileSync(alerts, "utf8"));
+  assert.ok(line, "alert written");
+  assert.match(line, /US-9000 \(bugs\) NOT ready for staging \| Agent review found 1 issue\(s\)/);
+  assert.match(line, /backend on fix\/us-9000: waiting for review \(2 files\); frontend on fix\/us-9000: waiting for review \(1 files\)/);
+  assert.match(await waitFor(() => /### Review status at/.test(fs.readFileSync(fin.reportPath, "utf8")) && fs.readFileSync(fin.reportPath, "utf8")), /NOT ready for staging/);
+
+  // next cycle: gate closed while the developer hasn't reviewed
+  s = startServer(env);
+  const gate1 = await s.call("review_gate");
+  assert.equal(gate1.canStartNewWork, false);
+  assert.equal(gate1.waitingForReview[0].unitId, unit.unitId);
+  assert.match((await s.call("start_unit", { userStoryId: 9100, itemType: "Task" })).error, /waiting for your review of US-9000-fix-/);
+
+  // developer stages the backend: still waiting
+  be.g("add", "-A");
+  const gate2 = await s.call("review_gate");
+  assert.equal(gate2.waitingForReview[0].repos.find((r) => r.folder === path.resolve(be.repo)).state, "staged, not committed");
+
+  // developer commits the backend and discards the frontend: reviewed, gate opens
+  be.g("commit", "-qm", "reviewed fixes");
+  fe.g("checkout", "--", "api/fees.txt");
+  const gate3 = await s.call("review_gate");
+  assert.equal(gate3.canStartNewWork, true);
+  assert.deepEqual(gate3.reviewedSinceLastCheck[0].repos.map((r) => r.state).sort(), ["committed", "discarded"]);
+
+  // a task unit for another story can start now: feature branch, still uncommitted
+  const u2 = await s.call("start_unit", { userStoryId: 9100, userStoryTitle: "Exports", itemType: "Task", items: [{ id: 201 }] });
+  assert.match(u2.unitId, /^US-9100-feature-/);
+  const w4 = await s.call("prepare_workdir", { bugId: 201, project: "backend", itemType: "Task", userStoryId: 9100, unitId: u2.unitId, files: [] });
+  assert.equal(w4.branch, "feature/us-9100");
+  assert.equal(be.g("branch", "--show-current"), "feature/us-9100");
+  // a bug can't be added to a task unit
+  assert.match((await s.call("prepare_workdir", { bugId: 202, project: "backend", itemType: "Bug", userStoryId: 9100, unitId: u2.unitId })).error, /is for task items/);
+  s.stop();
+});
+
+// ---------------------------------------------------------------- default base = the repository's root branch, whatever its name
+test("root branch: new branches are cut from each repository's own root branch (detected, not assumed), UAT ignored by default", async () => {
+  const root = path.join(tmp, "root-branch");
+  const remote = path.join(root, "origin.git");
+  const dev = path.join(root, "dev");
+  const repo = path.join(root, "app");
+  const g = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, encoding: "utf8" }).trim();
+  fs.mkdirSync(root, { recursive: true });
+  g(root, "init", "-q", "--bare", "-b", "trunk", remote); // root branch is neither main nor master
+  g(root, "clone", "-q", remote, dev);
+  fs.mkdirSync(path.join(dev, "api"));
+  fs.writeFileSync(path.join(dev, "api", "a.txt"), "trunk\n");
+  g(dev, "add", ".");
+  g(dev, "commit", "-qm", "init");
+  g(dev, "push", "-q", "origin", "HEAD:trunk");
+  g(dev, "checkout", "-qb", "UAT");
+  fs.writeFileSync(path.join(dev, "api", "uat.txt"), "uat\n");
+  g(dev, "add", ".");
+  g(dev, "commit", "-qm", "uat");
+  g(dev, "push", "-q", "origin", "UAT");
+  g(dev, "checkout", "-qb", "master", "trunk"); // a stale master exists too: must not win over the real root
+  g(dev, "push", "-q", "origin", "master");
+  g(root, "clone", "-q", remote, repo);
+  g(repo, "remote", "set-head", "origin", "-d"); // no origin/HEAD recorded: the remote must be asked
+  // a newer commit on trunk after the clone: the fetch picks it up
+  g(dev, "checkout", "-q", "trunk");
+  fs.writeFileSync(path.join(dev, "api", "latest.txt"), "latest trunk\n");
+  g(dev, "add", ".");
+  g(dev, "commit", "-qm", "latest");
+  g(dev, "push", "-q", "origin", "trunk");
+
+  const s = startServer(ENV(path.join(tmp, "d13"), {
+    BUG_AGENT_BASE_BRANCH: "${user_config.base_branch}", // unset -> root branch
+    BUG_AGENT_SYNC_BRANCH: "${user_config.sync_branch}", // unset -> no sync
+  }));
+  await s.call("set_projects", { projects: [{ name: "api", path: path.join(repo, "api"), description: "API" }] });
+  const w = await s.call("prepare_workdir", { bugId: 1, project: "api", itemType: "Bug", userStoryId: 4242, files: [] });
+  assert.equal(w.branch, "fix/us-4242");
+  assert.equal(w.branchSource, "new branch from origin/trunk");
+  assert.equal(w.syncWarning, undefined, "no sync by default");
+  assert.ok(fs.existsSync(path.join(w.workdir, "latest.txt")), "starts from the latest root branch");
+  assert.ok(!fs.existsSync(path.join(w.workdir, "uat.txt")), "UAT is not used by default");
+  assert.equal(g(repo, "rev-parse", "fix/us-4242"), g(repo, "rev-parse", "origin/trunk"));
   s.stop();
 });

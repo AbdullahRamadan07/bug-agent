@@ -19,6 +19,12 @@ Use the user story:
 - If the item and the story disagree (for example a bug reporter expects behaviour the criteria don't ask for, or a task contradicts a criterion), or the criteria are missing or too vague to tell what is correct, say so and lower your confidence; set `canFix` to false when the right behaviour is genuinely unclear.
 - If the item has no user story, work from the item alone and note that in `storyAlignment`.
 
+The story is worked on as one unit:
+- All of the story's Bugs are fixed in one cycle on one `fix/` branch, or all of its Tasks are implemented on one `feature/` branch. The changes stay uncommitted until the developer reviews them.
+- So the project folders may already contain uncommitted edits from earlier items of this same story. Treat them as part of the current code and build on them; don't plan to redo or revert them.
+- You are told which items of the story came before this one and what they changed.
+- For a Task, study the whole user story first (requirements, acceptance criteria and the other tasks), so this task's change fits the story's design.
+
 How to work:
 - You have read-only access. For a Bug, start from the symptoms and the suspected projects. For a Task, start from where the existing code handles the same area. Search for the relevant code and read it. Follow the data flow across projects when the work crosses a boundary, such as a frontend calling a backend API.
 - Skip build output and dependencies (node_modules, target, dist, bin, obj, .angular).
